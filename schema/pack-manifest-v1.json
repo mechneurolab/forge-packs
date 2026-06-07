@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "pack-manifest-v1.json",
+  "title": "FORGE Studio Pack Manifest",
+  "type": "object",
+  "required": ["id", "name", "version", "author", "workflows"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+      "description": "Unique pack identifier (kebab-case)"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+",
+      "description": "Semantic version"
+    },
+    "author": {
+      "type": "string"
+    },
+    "license": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "min_studio_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+"
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "forge_binaries": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "matlab_toolboxes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "python_packages": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "matlab_external": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "functions"],
+            "properties": {
+              "name": { "type": "string" },
+              "description": { "type": "string" },
+              "functions": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "help_url": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "workflows": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    }
+  }
+}
