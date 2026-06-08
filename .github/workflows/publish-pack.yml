@@ -1,0 +1,163 @@
+name: Publish pack
+
+# Build a forgepack from its committed sources under packs/<id>/, cut a GitHub
+# Release with the .forgepack asset, and open a PR that adds/updates the
+# index.json entry (download_url + sha256 + size pinned). Merging that PR is a
+# normal push to main, which runs `Validate catalog` and fires the docs deploy
+# hook — so the pack appears at forge-mri.dev/studio/catalog.
+#
+# Prereqs:
+#   - The pack sources are already reviewed and committed under packs/<id>/
+#     (that PR is the code-review gate; this workflow only publishes).
+#   - Repo setting "Allow GitHub Actions to create and approve pull requests"
+#     is enabled (Settings → Actions → General) so the PR can be opened with
+#     the built-in token. No PAT required.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pack_id:
+        description: 'Pack id — must match a directory under packs/ and the manifest id'
+        required: true
+        type: string
+      tags:
+        description: 'Optional comma-separated catalog tags (e.g. mre,elastography,3d)'
+        required: false
+        type: string
+
+permissions:
+  contents: write # create the Release + push the index branch
+  pull-requests: write # open the index PR
+
+concurrency:
+  group: publish-pack # serialize index.json edits across runs
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+
+      - name: Resolve pack id + version
+        id: meta
+        env:
+          PACK_ID: ${{ inputs.pack_id }}
+        run: |
+          set -euo pipefail
+          dir="packs/$PACK_ID"
+          if [ ! -f "$dir/manifest.yaml" ]; then
+            echo "::error::No manifest at $dir/manifest.yaml — commit the pack sources under packs/$PACK_ID/ first."
+            exit 1
+          fi
+          # Top-level id/version are simple unindented scalars; read them without YAML deps.
+          strip() { sed -E "s/^[^:]+:[[:space:]]*//; s/^[\"']//; s/[\"']$//" | tr -d '[:space:]'; }
+          MID=$(grep -E '^id:' "$dir/manifest.yaml" | head -1 | strip)
+          MVER=$(grep -E '^version:' "$dir/manifest.yaml" | head -1 | strip)
+          if [ "$MID" != "$PACK_ID" ]; then
+            echo "::error::manifest id ($MID) does not match pack_id ($PACK_ID)."
+            exit 1
+          fi
+          if [ -z "$MVER" ]; then
+            echo "::error::manifest has no version."
+            exit 1
+          fi
+          echo "version=$MVER" >> "$GITHUB_OUTPUT"
+          echo "tag=${PACK_ID}-v${MVER}" >> "$GITHUB_OUTPUT"
+          echo "asset=${PACK_ID}-${MVER}.forgepack" >> "$GITHUB_OUTPUT"
+
+      - name: Build .forgepack
+        id: build
+        env:
+          PACK_ID: ${{ inputs.pack_id }}
+          ASSET: ${{ steps.meta.outputs.asset }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/$ASSET"
+          ( cd "packs/$PACK_ID" && zip -rX "$out" . -x '.*' -x '__MACOSX/*' -x '*/.DS_Store' >/dev/null )
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$out" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "$out")" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          ASSET_PATH: ${{ steps.build.outputs.path }}
+          PACK_ID: ${{ inputs.pack_id }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — replacing the asset."
+            gh release upload "$TAG" "$ASSET_PATH" --clobber
+          else
+            gh release create "$TAG" "$ASSET_PATH" \
+              --title "$PACK_ID v$VERSION" \
+              --notes "Catalog forgepack for \`$PACK_ID\` v$VERSION, published by the publish-pack workflow."
+          fi
+
+      - name: Read release timestamp
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: echo "published_at=$(gh release view "$TAG" --json publishedAt -q .publishedAt)" >> "$GITHUB_OUTPUT"
+
+      - name: Update index.json
+        env:
+          PACK_ID: ${{ inputs.pack_id }}
+          TAGS: ${{ inputs.tags }}
+          DOWNLOAD_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ steps.meta.outputs.tag }}/${{ steps.meta.outputs.asset }}
+          SHA256: ${{ steps.build.outputs.sha256 }}
+          SIZE: ${{ steps.build.outputs.size }}
+          PUBLISHED_AT: ${{ steps.rel.outputs.published_at }}
+        run: |
+          set -euo pipefail
+          args=(--id "$PACK_ID" --download-url "$DOWNLOAD_URL" --sha256 "$SHA256" --size "$SIZE" --published-at "$PUBLISHED_AT")
+          if [ -n "${TAGS:-}" ]; then
+            args+=(--tags "$TAGS")
+          fi
+          node scripts/build-entry.mjs "${args[@]}"
+
+      - name: Validate (schema + re-download asset checksum)
+        run: npm run validate
+
+      - name: Open index PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACK_ID: ${{ inputs.pack_id }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          SHA256: ${{ steps.build.outputs.sha256 }}
+          SIZE: ${{ steps.build.outputs.size }}
+        run: |
+          set -euo pipefail
+          branch="publish/$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add index.json
+          git commit -m "Publish $PACK_ID v$VERSION"
+          git push -f origin "$branch"
+          existing=$(gh pr list --head "$branch" --state open --json number -q '.[0].number')
+          if [ -n "$existing" ]; then
+            echo "PR #$existing already open for $branch — pushed the updated entry to it."
+            exit 0
+          fi
+          printf '%s\n' \
+            "Automated by **publish-pack**." \
+            "" \
+            "Release \`$TAG\` is cut and \`index.json\` updated (sha256 \`$SHA256\`, $SIZE bytes)." \
+            "" \
+            "Validated in-workflow (schema + asset checksum). Merging is a push to \`main\`, which re-validates and fires the docs deploy hook, so \`$PACK_ID\` appears at forge-mri.dev/studio/catalog." \
+            "" \
+            "> The built-in Actions token opened this PR, so the \`Validate catalog\` *PR* check doesn't auto-run; the publish run validated already and the post-merge push runs it again as the gate." \
+            > "$RUNNER_TEMP/pr-body.md"
+          gh pr create --base main --head "$branch" \
+            --title "Publish $PACK_ID v$VERSION" \
+            --body-file "$RUNNER_TEMP/pr-body.md"
