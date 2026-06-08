@@ -1,4 +1,45 @@
 {
   "schema_version": 1,
-  "packs": []
+  "packs": [
+    {
+      "id": "empire-3d-mre",
+      "name": "EMPIRE 3D MRE",
+      "version": "1.0.0",
+      "author": "FORGE Team",
+      "license": "MIT",
+      "description": "3D Magnetic Resonance Elastography reconstruction pipeline for the EMPIRE pulse sequence. MATLAB preparation, FORGE SENSE reconstruction, harmonic wave extraction, HD-BET brain masking, and MRE inversion.",
+      "tags": ["mre", "elastography", "3d", "empire"],
+      "min_studio_version": "0.2.0",
+      "requires": {
+        "forge_binaries": ["forgeSense"],
+        "matlab_toolboxes": ["image_processing"],
+        "matlab_external": [
+          {
+            "name": "magneto",
+            "description": "MRI reconstruction toolbox providing the EMPIRE prep functions (RecoIL)",
+            "functions": [
+              "recoInfo",
+              "gridCoilImagesCal",
+              "combineCoilsInati3D",
+              "fieldCorrectedReconCal",
+              "convertRecoInfoToIsmrmrd"
+            ],
+            "help_url": "https://github.com/mechneurolab/forge-studio/issues/39"
+          }
+        ]
+      },
+      "modules": { "matlab": true, "python": true, "julia": false },
+      "scripts": [
+        "matlab/extractWaves.m",
+        "matlab/mre_wave.m",
+        "matlab/prepEmpire.m",
+        "python/hd_bet_masking.py"
+      ],
+      "download_url": "https://github.com/mechneurolab/forge-packs/releases/download/empire-3d-mre-v1.0.0/empire-3d-mre-1.0.0.forgepack",
+      "sha256": "4583ce1913a6968b70d32a281630b2a77d1ed8f1261ede3c773e5ac40a545ca6",
+      "size": 16418,
+      "verified": true,
+      "published_at": "2026-06-08T19:17:12Z"
+    }
+  ]
 }
