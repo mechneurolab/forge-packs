@@ -1,0 +1,31 @@
+id: empire-3d-mre
+name: EMPIRE 3D MRE
+version: 1.0.0
+author: FORGE Team
+license: MIT
+description: >-
+  3D Magnetic Resonance Elastography reconstruction pipeline for the
+  EMPIRE pulse sequence. MATLAB preparation, FORGE SENSE reconstruction,
+  harmonic wave extraction, HD-BET brain masking, and MRE inversion.
+min_studio_version: "0.2.0"
+
+requires:
+  forge_binaries:
+    - forgeSense
+  matlab_toolboxes:
+    - image_processing
+  # magneto is an external toolbox (not bundled in this pack). Add its folder
+  # under Settings → MATLAB extra paths. Tracked in mechneurolab/forge-studio#39.
+  matlab_external:
+    - name: magneto
+      description: MRI reconstruction toolbox providing the EMPIRE prep functions (RecoIL)
+      functions:
+        - recoInfo
+        - gridCoilImagesCal
+        - combineCoilsInati3D
+        - fieldCorrectedReconCal
+        - convertRecoInfoToIsmrmrd
+      help_url: https://github.com/mechneurolab/forge-studio/issues/39
+
+workflows:
+  - empire-3d-mre.yaml

@@ -1,0 +1,4 @@
+# Python dependencies for the EMPIRE 3D MRE workflow
+# Install: pip install -r empire-3d-mre-requirements.txt
+hd-bet>=2.0.0
+nibabel>=5.0.0

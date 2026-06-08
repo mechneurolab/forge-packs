@@ -1,0 +1,320 @@
+schema_version: 1
+id: empire-3d-mre
+name: EMPIRE 3D MRE
+description: >-
+  3D Magnetic Resonance Elastography reconstruction pipeline for the
+  EMPIRE pulse sequence (udel_3d_empire). Uses MATLAB-based preparation
+  to parse TWIX data, estimate coil sensitivities, and produce a prepared
+  ISMRMRD file. Reconstruction via forgeSense (single-shot SENSE).
+  Postprocessing extracts harmonic wave displacements from the
+  reconstructed MRE images.
+version: 1
+author: FORGE Team
+tags: [mre, elastography, 3d, empire, sense]
+python_requirements: requirements.txt
+
+protocol_match:
+  patterns:
+    - "*empire3*"
+    - "*udel_3d_empire*"
+  priority: 10
+
+inputs:
+  formats: [twix]
+
+  main:
+    description: "3D EMPIRE MRE acquisition"
+
+  calibration:
+    required: true
+    source: prescan
+    sources:
+      prescan:
+        description: "Prescan calibration data embedded in the main TWIX acquisition"
+    acquisition:
+      trajectory: same
+      fully_sampled: true
+      contrast: GRE
+      description: >-
+        Fully-sampled prescan volume for coil sensitivity map estimation,
+        embedded in the main TWIX file.
+
+stages:
+  - name: Preparation
+    type: preprocessing
+    backend: matlab
+    steps:
+      - id: prep_empire
+        name: EMPIRE Data Preparation
+        module: prepEmpire
+        params:
+          output_format:
+            type: enum
+            label: Output format
+            description: Format of the prepared data file
+            values: [ismrmrd]
+            default: ismrmrd
+    output:
+      filename_template: "{input_basename}_prepared.h5"
+      keep_intermediate: true
+
+  - name: Reconstruction
+    type: reconstruction
+    backend: forge
+    steps:
+      - id: sense_recon
+        name: SENSE Reconstruction
+        module: forgeSense
+        params:
+          fourier_transform:
+            type: enum
+            label: Fourier transform
+            description: Fourier transform implementation for non-Cartesian data
+            values: [NUFFT, DFT, DFTGrads]
+            default: NUFFT
+          time_segments:
+            type: int
+            label: Time segments
+            description: Number of time segments for off-resonance field correction (1 = no correction)
+            default: 1
+            min: 1
+            max: 20
+          time_seg_interp:
+            type: enum
+            label: Time segmentation interpolator
+            description: Interpolation method for multi-frequency off-resonance correction
+            values: [hanning, minmax, histo]
+            default: hanning
+            group: Advanced
+          iterations:
+            type: int
+            label: CG iterations
+            description: Maximum number of conjugate gradient solver iterations
+            default: 20
+            min: 1
+            max: 200
+          beta:
+            type: float
+            label: Regularization (beta)
+            description: Spatial regularization penalty weight
+            default: 0.001
+            min: 0.0
+            max: 1.0
+            scale: log
+            precision: 4
+          dims2penalize:
+            type: int
+            label: Regularization dimensions
+            description: Number of spatial dimensions to apply regularization (2 or 3)
+            default: 3
+            min: 2
+            max: 3
+            group: Advanced
+
+  - name: Wave Extraction
+    type: postprocessing
+    backend: matlab
+    steps:
+      - id: wave_extract
+        name: Harmonic Wave Extraction
+        module: extractWaves
+        params:
+          frequency_hz:
+            type: float
+            label: Vibration frequency (Hz)
+            description: Mechanical excitation frequency used during the MRE acquisition
+            default: 60.0
+            min: 10.0
+            max: 500.0
+            step: 5.0
+            unit: Hz
+          num_harmonics:
+            type: int
+            label: Number of harmonics
+            description: Number of harmonic components to extract from the phase offsets
+            default: 1
+            min: 1
+            max: 4
+          displacement_component:
+            type: enum
+            label: Displacement output
+            description: Which displacement components to extract
+            values: [all, magnitude, x, y, z]
+            labels:
+              all: All components (x, y, z)
+              magnitude: Magnitude only
+              x: X component only
+              y: Y component only
+              z: Z component only
+            default: all
+          n_echoes:
+            type: int
+            label: Number of echoes
+            description: Number of echo acquisitions per MEG direction per phase offset
+            default: 2
+            min: 1
+            max: 4
+            group: Advanced
+          n_meg_directions:
+            type: int
+            label: MEG directions
+            description: Number of motion encoding gradient directions
+            default: 3
+            min: 1
+            max: 3
+            group: Advanced
+          phase_to_disp_scale:
+            type: float
+            label: Phase-to-displacement scale
+            description: Scaling factor to convert phase difference to displacement (sequence-dependent)
+            default: 1.764
+            min: 0.0
+            max: 10.0
+            precision: 4
+            group: Advanced
+    output:
+      subdirectory: "waves"
+      files:
+        - id: wave_z_real
+          filename_template: "{input_basename}_wave_Z_real.nii"
+          description: "Z-component wave displacement (real part)"
+          colormap: mre_wave
+          window: [-1, 1]
+        - id: wave_z_imag
+          filename_template: "{input_basename}_wave_Z_imag.nii"
+          description: "Z-component wave displacement (imaginary part)"
+          colormap: mre_wave
+          window: [-1, 1]
+        - id: wave_y_real
+          filename_template: "{input_basename}_wave_Y_real.nii"
+          description: "Y-component wave displacement (real part)"
+          colormap: mre_wave
+          window: [-1, 1]
+        - id: wave_y_imag
+          filename_template: "{input_basename}_wave_Y_imag.nii"
+          description: "Y-component wave displacement (imaginary part)"
+          colormap: mre_wave
+          window: [-1, 1]
+        - id: wave_x_real
+          filename_template: "{input_basename}_wave_X_real.nii"
+          description: "X-component wave displacement (real part)"
+          colormap: mre_wave
+          window: [-1, 1]
+        - id: wave_x_imag
+          filename_template: "{input_basename}_wave_X_imag.nii"
+          description: "X-component wave displacement (imaginary part)"
+          colormap: mre_wave
+          window: [-1, 1]
+        - id: mre_params
+          filename_template: "{input_basename}_mre_params.json"
+          description: "MRE parameters (frequency, scale, SNR metrics)"
+        - id: mre_mask
+          filename_template: "{input_basename}_mask.nii"
+          description: "Binary mask used for wave extraction"
+        - id: t2_stack
+          filename_template: "{input_basename}_t2stack.nii"
+          description: "T2-weighted magnitude stack (echo geometric mean)"
+        - id: mre_sentinel
+          filename_template: "{input_basename}_mre_sentinel.mat"
+          description: "Sentinel-ready MRE displacement bundle (read_mre_uiuc layout)"
+      overlay_on_reconstruction: true
+
+  - name: Brain Masking
+    type: interactive
+    backend: python
+    module: hd-bet-masking
+    auto_method: hd-bet
+    allow_manual_edit: true
+    auto_approve: false
+    passthrough_inputs: true
+    output:
+      filename_template: "{input_basename}_brain_mask.nii"
+      keep_intermediate: true
+
+  - name: MRE Inversion
+    type: postprocessing
+    backend: julia
+    enabled: true
+    passthrough_inputs: false
+    steps:
+      - id: mre_inversion
+        name: Sentinel Nonlinear Inversion
+        module: sentinel-inversion
+        params:
+          material_model:
+            type: enum
+            label: Material model
+            values: [isotropic, isotropic_compressible, orthotropic, poroelastic, transverse_isotropic, generalized_anisotropic]
+            default: isotropic
+          regularization:
+            type: enum
+            label: Regularization
+            values: [total_variation, tikhonov, soft_prior, spatial_filter, van_houten, marquardt, joachimowicz]
+            default: total_variation
+          reg_weight:
+            type: float
+            label: Regularization weight
+            default: 0.001
+            min: 0.0
+            max: 1.0
+            scale: log
+            precision: 4
+          optimizer:
+            type: enum
+            label: Optimizer
+            values: [conjugate_gradient, gauss_newton, quasi_newton]
+            default: gauss_newton
+          linear_solver:
+            type: enum
+            label: Linear solver
+            values: [krylov, mumps]
+            default: krylov
+            group: Advanced
+          frequency_hz:
+            type: float
+            label: Vibration frequency (Hz)
+            default: 60.0
+            min: 10.0
+            max: 500.0
+            unit: Hz
+          density_kg_m3:
+            type: float
+            label: Tissue density (kg/m^3)
+            default: 1000.0
+            min: 900.0
+            max: 1100.0
+            unit: kg/m^3
+            group: Advanced
+          mesh_resolution:
+            type: int
+            label: Mesh strategy
+            default: 1
+            min: 1
+            max: 3
+            group: Advanced
+          max_global_iters:
+            type: int
+            label: Max global iterations
+            default: 20
+            min: 1
+            max: 200
+            group: Advanced
+    output:
+      subdirectory: "derived"
+      files:
+        - id: stiffness_map
+          filename_template: "{input_basename}_stiffness.nii"
+          description: "Shear stiffness (mu) in kPa"
+          colormap: hot
+          window: [0, 10]
+        - id: loss_angle_map
+          filename_template: "{input_basename}_loss_angle.nii"
+          description: "Loss angle (phi) in degrees"
+          colormap: mre_wave
+          window: [-90, 90]
+      overlay_on_reconstruction: true
+
+viewer:
+  base_colormap: gray
+  show_crosshairs: true
+  show_colorbar: true
