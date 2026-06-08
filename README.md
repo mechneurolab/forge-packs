@@ -15,12 +15,11 @@ scripts/validate-index.mjs       # validates index.json + verifies each asset's 
 ## How a pack gets published
 
 1. An author runs **Submit a pack** in FORGE Studio, which exports a `.forgepack`, writes a candidate `index.json` entry, and opens a pre-filled issue here (label `pack-submission`) with the entry + the file to attach.
-2. A maintainer reviews the pack's code (it runs on users' machines), then:
-   - adds the pack sources under `packs/<id>/`,
-   - cuts a **GitHub Release** with the reviewed `.forgepack` as an asset,
-   - adds the entry to `index.json` with the asset's `download_url`, `sha256`, `size`, and `verified: true`,
-   - opens a PR. CI (`Validate catalog`) checks `index.json` against the schema **and** re-verifies every entry's `sha256` against its released asset.
-3. On merge, the pack appears in everyone's catalog on the next refresh.
+2. A maintainer reviews the pack's code (it runs on users' machines) and commits the sources under `packs/<id>/` via a normal PR — that review is the trust gate.
+3. The maintainer runs the **Publish pack** workflow (Actions → *Publish pack* → *Run workflow*, enter the pack id, optional `tags`). It builds the `.forgepack`, cuts a GitHub Release with it, computes `sha256` + `size`, adds the entry to `index.json` (`verified: true`), validates (schema + re-downloaded asset checksum), and opens a PR. To publish manually instead, see the steps in `.github/workflows/publish-pack.yml`.
+4. On merge, `Validate catalog` re-verifies every entry's `sha256` against its released asset and fires the docs deploy hook — the pack appears in everyone's catalog and at [forge-mri.dev/studio/catalog](https://forge-mri.dev/studio/catalog).
+
+> **One-time setup** for the Publish pack workflow: enable *Settings → Actions → General → Allow GitHub Actions to create and approve pull requests*, so the workflow can open the index PR with the built-in token (no PAT needed).
 
 ## Catalog entry shape
 
