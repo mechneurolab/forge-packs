@@ -26,6 +26,14 @@ scripts/validate-index.mjs       # validates index.json + verifies each asset's 
 
 Each entry in `index.json` is a superset of the pack manifest plus distribution metadata. The authoritative schema is `schema/pack-registry-v1.json`; required fields: `id, name, version, author, modules, scripts, download_url, sha256, size, verified`. See FORGE Studio's `specs/Phase8/forge-pack-registry-spec.md` §3 for a worked example.
 
+## Catalog website
+
+The catalog is also browsable at **[forge-mri.dev/studio/catalog](https://forge-mri.dev/studio/catalog)** — a section of the FORGE Studio docs (VitePress) that reads this `index.json` at **build time** and renders a searchable grid plus a detail page per pack.
+
+Because the data is baked in at build time, the website only picks up new packs when the studio docs rebuild. The `Validate catalog` workflow fires a **Cloudflare Pages deploy hook** on every push to `main` to trigger that rebuild.
+
+**One-time setup** (maintainer): in the Cloudflare dashboard, open the `forge-studio` Pages project → **Settings → Builds & deployments → Deploy hooks**, create a hook (e.g. `forge-packs-update`) on the production branch, copy its URL, and add it here as the repo secret **`STUDIO_DOCS_DEPLOY_HOOK`** (`Settings → Secrets and variables → Actions`). Until it's set, the trigger step skips harmlessly and the catalog still refreshes on the next unrelated studio docs deploy.
+
 ## Security
 
 - The app verifies the downloaded archive's `sha256` against `index.json` **before extraction** and only fetches from GitHub release hosts. CI re-verifies checksums on every PR.
