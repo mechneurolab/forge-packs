@@ -15,3 +15,27 @@ jobs:
           node-version: '20'
       - run: npm install
       - run: npm run validate
+
+  # After a validated change lands on main, trigger a FORGE Studio docs rebuild
+  # so the pack catalog (forge-mri.dev/studio/catalog) refreshes. The docs read
+  # this index.json at build time, so they only pick up new packs on a rebuild.
+  # STUDIO_DOCS_DEPLOY_HOOK is a Cloudflare Pages deploy-hook URL stored as a
+  # repo secret; if it isn't set the step is skipped (no failure).
+  trigger-docs-rebuild:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger FORGE Studio docs rebuild
+        env:
+          HOOK: ${{ secrets.STUDIO_DOCS_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "STUDIO_DOCS_DEPLOY_HOOK not set — skipping catalog rebuild." >&2
+            exit 0
+          fi
+          echo "Triggering FORGE Studio docs rebuild…"
+          # Retry transient failures so a momentary Cloudflare 5xx doesn't leave
+          # the catalog stale until the next push.
+          curl -fsS -X POST --retry 3 --retry-all-errors --max-time 30 "$HOOK" >/dev/null
+          echo "Deploy hook fired."
