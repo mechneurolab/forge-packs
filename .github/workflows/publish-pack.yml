@@ -70,7 +70,7 @@ jobs:
           echo "tag=${PACK_ID}-v${MVER}" >> "$GITHUB_OUTPUT"
           echo "asset=${PACK_ID}-${MVER}.forgepack" >> "$GITHUB_OUTPUT"
 
-      - name: Build .forgepack
+      - name: Build .forgepack (reproducible)
         id: build
         env:
           PACK_ID: ${{ inputs.pack_id }}
@@ -78,7 +78,15 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/$ASSET"
-          ( cd "packs/$PACK_ID" && zip -rX "$out" . -x '.*' -x '__MACOSX/*' -x '*/.DS_Store' >/dev/null )
+          src="packs/$PACK_ID"
+          # Reproducible archive so identical sources always produce the same
+          # sha256 (no checksum churn on re-publish): pin every entry's mtime to
+          # a fixed epoch (zip's DOS timestamp can't predate 1980), drop dotfiles,
+          # and add files in a stable LC_ALL=C-sorted order with no extra
+          # attributes (-X) and no directory entries.
+          export TZ=UTC
+          find "$src" -exec touch -t 202001010000.00 {} +
+          ( cd "$src" && find . -type f ! -path '*/.*' | LC_ALL=C sort | sed 's|^\./||' | zip -X "$out" -@ >/dev/null )
           echo "path=$out" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$out" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "size=$(stat -c%s "$out")" >> "$GITHUB_OUTPUT"
