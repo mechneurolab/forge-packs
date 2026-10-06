@@ -87,27 +87,53 @@ function output_paths = prepEmpire(config_path)
 
   convertRecoInfoToIsmrmrd(sprintf('%s',output_h5),rInfo,permute(sen,[1 2 3 5 4]), FMzeros);
 
-  % Save overlay image (magnitude) as NIfTI with orientation header
+  % Save overlay image (magnitude) as NIfTI for downstream brain masking.
   overlay_path = fullfile(output_dir, sprintf('%s_overlay.nii', basename));
   overlay_mag = single(abs(squeeze(imgOverlay)));
 
-  % Build NIfTI sform affine from rInfo orientation data.
-  % rInfo stores direction cosines in LPS (DICOM/ISMRMRD convention).
-  % NIfTI uses RAS, so flip the first two axes (L->R, P->A).
-  lps2ras = diag([-1, -1, 1]);
-  voxSize = [rInfo.FOV/rInfo.N, rInfo.FOV/rInfo.N, rInfo.sliceThickness];
-  R = lps2ras * [rInfo.readDir(:), rInfo.phaseDir(:), rInfo.sliceDir(:)];
-  T = lps2ras * rInfo.slicePosition(:, 1);
-  affine = eye(4);
-  affine(1:3, 1:3) = R .* voxSize;
-  affine(1:3, 4) = T;
+  % Prefer an oriented NIfTI (sform affine built from rInfo direction
+  % cosines) so downstream brain masking sees correct anatomy. This requires
+  % a recent Magneto (readDir/phaseDir/sliceDir/slicePosition/FOV/
+  % sliceThickness on recoInfoTwix) and the NIfTI toolbox (make_nii/save_nii).
+  % Older Magneto installs lack those properties and previously aborted the
+  % whole preparation stage (forge-studio#53). Degrade gracefully to a plain,
+  % unoriented NIfTI rather than crashing the reconstruction.
+  wrote_oriented = false;
+  orient_fields = {'readDir', 'phaseDir', 'sliceDir', 'slicePosition', ...
+                   'FOV', 'sliceThickness'};
+  have_orient = all(cellfun(@(f) isprop(rInfo, f), orient_fields));
+  if have_orient && exist('make_nii', 'file') && exist('save_nii', 'file')
+    try
+      % rInfo stores direction cosines in LPS (DICOM/ISMRMRD convention).
+      % NIfTI uses RAS, so flip the first two axes (L->R, P->A).
+      lps2ras = diag([-1, -1, 1]);
+      voxSize = [rInfo.FOV/rInfo.N, rInfo.FOV/rInfo.N, rInfo.sliceThickness];
+      R = lps2ras * [rInfo.readDir(:), rInfo.phaseDir(:), rInfo.sliceDir(:)];
+      T = lps2ras * rInfo.slicePosition(:, 1);
+      affine = eye(4);
+      affine(1:3, 1:3) = R .* voxSize;
+      affine(1:3, 4) = T;
 
-  nii = make_nii(overlay_mag, voxSize, [0 0 0], 16, 'EMPIRE overlay');
-  nii.hdr.hist.sform_code = 1;  % Scanner anatomical coordinates
-  nii.hdr.hist.srow_x = affine(1, :);
-  nii.hdr.hist.srow_y = affine(2, :);
-  nii.hdr.hist.srow_z = affine(3, :);
-  save_nii(nii, overlay_path);
+      nii = make_nii(overlay_mag, voxSize, [0 0 0], 16, 'EMPIRE overlay');
+      nii.hdr.hist.sform_code = 1;  % Scanner anatomical coordinates
+      nii.hdr.hist.srow_x = affine(1, :);
+      nii.hdr.hist.srow_y = affine(2, :);
+      nii.hdr.hist.srow_z = affine(3, :);
+      save_nii(nii, overlay_path);
+      wrote_oriented = true;
+    catch err
+      forge_log('warn', ['prepEmpire: could not write oriented overlay ' ...
+        '(%s); falling back to an unoriented NIfTI'], err.message);
+    end
+  else
+    forge_log('warn', ['prepEmpire: rInfo lacks orientation fields or the ' ...
+      'NIfTI toolbox is unavailable; writing an unoriented overlay ' ...
+      '(update Magneto for oriented output — see forge-studio#53)']);
+  end
+
+  if ~wrote_oriented
+    niftiwrite(overlay_mag, overlay_path);
+  end
   forge_log('info', 'prepEmpire: saved overlay image → %s', overlay_path);
 
   forge_progress_done('parse');
