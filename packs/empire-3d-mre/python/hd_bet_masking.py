@@ -56,6 +56,23 @@ def _select_magnitude_volume(nii_path: str, tmp_dir: str) -> str:
     return out
 
 
+def _resolve_device(torch, override: str | None) -> str:
+    """Pick the compute device for HD-BET.
+
+    Honors an explicit ``device`` param when given; otherwise auto-detects the
+    best available accelerator, newest-first: CUDA → Apple MPS → CPU. The caller
+    retries on CPU if the chosen accelerator fails at runtime. (#94)
+    """
+    if override:
+        return str(override)
+    if torch.cuda.is_available():
+        return "cuda"
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def run(config_path: str) -> list[str]:
     config = forge_read_config(config_path)
     input_paths: list[str] = config["input_paths"]
@@ -121,9 +138,10 @@ def run(config_path: str) -> list[str]:
 
     forge_log("info", "HD-BET input: %s", os.path.basename(mag_path))
 
-    # Options
+    # Options. `device` defaults to None → auto-detect (CUDA/MPS/CPU); a workflow
+    # may pin it explicitly (e.g. "cpu" or "cuda:1"). (#94)
     use_tta = forge_param(config, "use_tta", default=False)
-    device_str = forge_param(config, "device", default="cpu")
+    device_override = forge_param(config, "device", default=None)
 
     with tempfile.TemporaryDirectory(prefix="hdbet_") as tmp_dir:
         # Prepare input: ensure .nii.gz + extract single volume if 4-D
@@ -133,29 +151,46 @@ def run(config_path: str) -> list[str]:
         # HD-BET output paths (in tmp first, then copy to output_dir)
         hdbet_output = os.path.join(tmp_dir, "brain.nii.gz")
 
-        forge_log("info", "Running HD-BET (device=%s, tta=%s)...", device_str, use_tta)
-
         # Import HD-BET (heavy import, deferred to avoid slow startup)
         import torch
+        torch.set_num_threads(4)
         from HD_BET.checkpoint_download import maybe_download_parameters
-        from HD_BET.hd_bet_prediction import get_hdbet_predictor, hdbet_predict
+        from HD_BET.paths import folder_with_parameter_files
+        from HD_BET.hd_bet_prediction import hdbet_predict
+        from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
         maybe_download_parameters()
+        model_folder = folder_with_parameter_files
 
-        device = torch.device(device_str)
-        predictor = get_hdbet_predictor(
-            use_tta=bool(use_tta),
-            device=device,
-            verbose=False,
-        )
+        def _run_hdbet(dev: str) -> None:
+            forge_log("info", "Running HD-BET (device=%s, tta=%s)...", dev, use_tta)
+            # HD-BET release 2.0.0 ships a single "fold_all" model, not individual
+            # fold models. Use ('all',) to load it. This also keeps RAM reasonable
+            # (~5GB vs 27GB+ with the old 5-fold ensemble).
+            predictor = nnUNetPredictor(
+                perform_everything_on_device=False,
+                device=torch.device(dev),
+                verbose=False,
+                allow_tqdm=False,
+            )
+            predictor.initialize_from_trained_model_folder(model_folder, ('all',))
+            hdbet_predict(
+                input_file_or_folder=gz_input,
+                output_file_or_folder=hdbet_output,
+                predictor=predictor,
+                keep_brain_mask=True,
+                compute_brain_extracted_image=False,
+            )
 
-        hdbet_predict(
-            input_file_or_folder=gz_input,
-            output_file_or_folder=hdbet_output,
-            predictor=predictor,
-            keep_brain_mask=True,
-            compute_brain_extracted_image=False,
-        )
+        device_str = _resolve_device(torch, device_override)
+        try:
+            _run_hdbet(device_str)
+        except Exception as exc:  # noqa: BLE001 — any accelerator failure → CPU
+            if device_str == "cpu":
+                raise
+            forge_log("warn", "HD-BET failed on device '%s' (%s); retrying on CPU.",
+                      device_str, exc)
+            _run_hdbet("cpu")
 
         # HD-BET writes mask as {output}_bet.nii.gz
         mask_gz = hdbet_output.replace(".nii.gz", "_bet.nii.gz")

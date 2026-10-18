@@ -12,6 +12,8 @@ version: 1
 author: FORGE Team
 tags: [mre, elastography, 3d, empire, sense]
 python_requirements: requirements.txt
+# HD-BET >=2.0 (brain masking) is only published for Python >=3.10.
+python_min_version: "3.10"
 
 protocol_match:
   patterns:
@@ -305,13 +307,16 @@ stages:
         - id: stiffness_map
           filename_template: "{input_basename}_stiffness.nii"
           description: "Shear stiffness (mu) in kPa"
-          colormap: hot
+          colormap: mre_stiff
           window: [0, 10]
         - id: loss_angle_map
           filename_template: "{input_basename}_loss_angle.nii"
           description: "Loss angle (phi) in degrees"
           colormap: mre_wave
           window: [-90, 90]
+        - id: inversion_stats
+          filename_template: "{input_basename}_inversion_stats.json"
+          description: "Inversion solve statistics (convergence, mesh, zones)"
       overlay_on_reconstruction: true
 
 viewer:
