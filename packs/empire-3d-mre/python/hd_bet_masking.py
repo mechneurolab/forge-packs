@@ -153,18 +153,27 @@ def run(config_path: str) -> list[str]:
 
         # Import HD-BET (heavy import, deferred to avoid slow startup)
         import torch
+        torch.set_num_threads(4)
         from HD_BET.checkpoint_download import maybe_download_parameters
-        from HD_BET.hd_bet_prediction import get_hdbet_predictor, hdbet_predict
+        from HD_BET.paths import folder_with_parameter_files
+        from HD_BET.hd_bet_prediction import hdbet_predict
+        from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
         maybe_download_parameters()
+        model_folder = folder_with_parameter_files
 
         def _run_hdbet(dev: str) -> None:
             forge_log("info", "Running HD-BET (device=%s, tta=%s)...", dev, use_tta)
-            predictor = get_hdbet_predictor(
-                use_tta=bool(use_tta),
+            # HD-BET release 2.0.0 ships a single "fold_all" model, not individual
+            # fold models. Use ('all',) to load it. This also keeps RAM reasonable
+            # (~5GB vs 27GB+ with the old 5-fold ensemble).
+            predictor = nnUNetPredictor(
+                perform_everything_on_device=False,
                 device=torch.device(dev),
                 verbose=False,
+                allow_tqdm=False,
             )
+            predictor.initialize_from_trained_model_folder(model_folder, ('all',))
             hdbet_predict(
                 input_file_or_folder=gz_input,
                 output_file_or_folder=hdbet_output,
