@@ -8,6 +8,12 @@
       "author": "FORGE Team",
       "license": "MIT",
       "description": "3D Magnetic Resonance Elastography reconstruction pipeline for the EMPIRE pulse sequence. MATLAB preparation, FORGE SENSE reconstruction, harmonic wave extraction, HD-BET brain masking, and MRE inversion.",
+      "tags": [
+        "mre",
+        "elastography",
+        "3d",
+        "empire"
+      ],
       "min_studio_version": "0.3.0",
       "requires": {
         "forge_binaries": [
