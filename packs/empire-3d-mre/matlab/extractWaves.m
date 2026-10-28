@@ -41,7 +41,7 @@ function output_paths = extractWaves(config_path)
   end
 
   % Parameters
-  freq_hz        = forge_param(config, 'frequency_hz', 60.0);
+  freq_hz        = forge_param(config, 'frequency_hz', 50.0);
   num_harmonics  = forge_param(config, 'num_harmonics', 1);
   disp_comp      = forge_param(config, 'displacement_component', 'all');
   n_echoes       = forge_param(config, 'n_echoes', 2);

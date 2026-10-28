@@ -8,7 +8,7 @@ description: >-
   ISMRMRD file. Reconstruction via forgeSense (single-shot SENSE).
   Postprocessing extracts harmonic wave displacements from the
   reconstructed MRE images.
-version: 1
+version: 2
 author: FORGE Team
 tags: [mre, elastography, 3d, empire, sense]
 python_requirements: requirements.txt
@@ -124,8 +124,11 @@ stages:
           frequency_hz:
             type: float
             label: Vibration frequency (Hz)
-            description: Mechanical excitation frequency used during the MRE acquisition
-            default: 60.0
+            description: >-
+              Mechanical excitation frequency used during the MRE acquisition.
+              The inversion reads it from the wave-extraction output, so set it
+              here only.
+            default: 50.0
             min: 10.0
             max: 500.0
             step: 5.0
@@ -221,6 +224,8 @@ stages:
           description: "Sentinel-ready MRE displacement bundle (read_mre_uiuc layout)"
       overlay_on_reconstruction: true
 
+  # The approved (optionally edited) HD-BET mask is passed on to the inversion,
+  # which uses it in place of the magnitude-threshold mask in the .mat.
   - name: Brain Masking
     type: interactive
     backend: python
@@ -243,6 +248,20 @@ stages:
         name: Sentinel Nonlinear Inversion
         module: sentinel-inversion
         params:
+          compute_backend:
+            type: enum
+            label: Compute backend
+            description: >-
+              GPU acceleration vs multicore CPU for the inversion's gradient
+              computation. 'gpu' uses the platform accelerator (Metal on macOS,
+              CUDA on Linux), falling back to CPU if unavailable. 'auto' defers
+              to the global Sentinel setting (Settings → Backends).
+            values: [auto, gpu, cpu]
+            labels:
+              auto: "Auto (Settings default)"
+              gpu: "GPU acceleration"
+              cpu: "Multicore CPU"
+            default: auto
           material_model:
             type: enum
             label: Material model
@@ -272,13 +291,8 @@ stages:
             values: [krylov, mumps]
             default: krylov
             group: Advanced
-          frequency_hz:
-            type: float
-            label: Vibration frequency (Hz)
-            default: 60.0
-            min: 10.0
-            max: 500.0
-            unit: Hz
+          # No frequency_hz here: the worker takes mreParams.freq from the
+          # wave-extraction .mat, so the two stages cannot disagree.
           density_kg_m3:
             type: float
             label: Tissue density (kg/m^3)
