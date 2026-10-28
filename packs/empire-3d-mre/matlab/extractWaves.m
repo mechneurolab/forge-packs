@@ -257,7 +257,9 @@ function output_paths = extractWaves(config_path)
   ref_nii = load_untouch_nii(first_mag);
 
   % Compute OSS-SNR from unwrapped phase images
-  OSS_SNR = oss_snr_filter(double(phase_unwrapped), [dx dy dz], freq_hz, double(mask));
+  % oss_snr_filter (magneto convdata) writes dcfiles/ into the current
+  % directory and prompts if it exists, so run it in a fresh temp directory.
+  OSS_SNR = oss_snr_in_tempdir(double(phase_unwrapped), [dx dy dz], freq_hz, double(mask));
 
   % Compute t2stack (mean magnitude across reps) for anatomical reference
   t2stack = mean(abs(squeeze(img)), ndims(squeeze(img)));
@@ -432,4 +434,23 @@ function check_mask_orientation(mask, ref, mask_path)
   assert(best <= c + 0.1, 'extractWaves:maskFlipped', ...
     ['Brain mask %s does not line up with the reconstruction: %.1f%% overlap as is, ' ...
      '%.1f%% when flipped along dims %s'], mask_path, 100 * c, 100 * best, mat2str(best_dims));
+end
+
+
+function OSS_SNR = oss_snr_in_tempdir(phase, voxel_size, freq_hz, mask)
+%OSS_SNR_IN_TEMPDIR  Run oss_snr_filter inside a fresh temporary directory.
+%  magneto's convdata writes dcfiles/ into the current directory and prompts
+%  for confirmation if it already exists, which fails without a console.
+  tmp_dir = tempname;
+  mkdir(tmp_dir);
+  old_dir = cd(tmp_dir);
+  cleanup = onCleanup(@() restore_and_remove(old_dir, tmp_dir)); %#ok<NASGU>
+  OSS_SNR = oss_snr_filter(phase, voxel_size, freq_hz, mask);
+end
+
+function restore_and_remove(old_dir, tmp_dir)
+  cd(old_dir);
+  if exist(tmp_dir, 'dir')
+    rmdir(tmp_dir, 's');
+  end
 end
