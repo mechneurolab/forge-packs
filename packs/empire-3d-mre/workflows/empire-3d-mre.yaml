@@ -271,15 +271,22 @@ stages:
             type: enum
             label: Regularization
             values: [total_variation, tikhonov, soft_prior, spatial_filter, van_houten, marquardt, joachimowicz]
-            default: total_variation
+            # spatial_filter adds nothing to Sentinel's always-on set (spatial
+            # filter, CG residual scaling, Van Houten, McGarry bounds), which is
+            # NLI's standard EMPIRE regularization.
+            default: spatial_filter
           reg_weight:
             type: float
             label: Regularization weight
-            default: 0.001
+            description: >-
+              Weight of the selected TV / Tikhonov / Joachimowicz / soft-prior
+              term (ignored by spatial_filter). 5e-16 is Sentinel's calibrated
+              TV default.
+            default: 5.0e-16
             min: 0.0
             max: 1.0
             scale: log
-            precision: 4
+            precision: 16
           optimizer:
             type: enum
             label: Optimizer
