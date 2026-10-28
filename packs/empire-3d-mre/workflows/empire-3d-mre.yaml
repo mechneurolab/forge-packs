@@ -311,7 +311,7 @@ stages:
           max_global_iters:
             type: int
             label: Max global iterations
-            default: 20
+            default: 100
             min: 1
             max: 200
             group: Advanced
