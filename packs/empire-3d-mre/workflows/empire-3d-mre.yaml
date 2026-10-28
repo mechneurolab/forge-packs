@@ -8,7 +8,7 @@ description: >-
   ISMRMRD file. Reconstruction via forgeSense (single-shot SENSE).
   Postprocessing extracts harmonic wave displacements from the
   reconstructed MRE images.
-version: 2
+version: 3
 author: FORGE Team
 tags: [mre, elastography, 3d, empire, sense]
 python_requirements: requirements.txt
@@ -113,9 +113,27 @@ stages:
             max: 3
             group: Advanced
 
+  # HD-BET runs on the reconstructed magnitude (the prep overlay, same grid).
+  # The approved (optionally edited) mask goes to Wave Extraction, which
+  # unwraps and extracts over it; passthrough carries the recon outputs along.
+  - name: Brain Masking
+    type: interactive
+    backend: python
+    module: hd-bet-masking
+    auto_method: hd-bet
+    allow_manual_edit: true
+    auto_approve: false
+    passthrough_inputs: true
+    output:
+      filename_template: "{input_basename}_brain_mask.nii"
+      keep_intermediate: true
+
   - name: Wave Extraction
     type: postprocessing
     backend: matlab
+    # Pass the brain mask on so the inversion worker can check it against the
+    # .mat (its brain ∩ magnitude-mask safety net).
+    passthrough_inputs: true
     steps:
       - id: wave_extract
         name: Harmonic Wave Extraction
@@ -215,7 +233,7 @@ stages:
           description: "MRE parameters (frequency, scale, SNR metrics)"
         - id: mre_mask
           filename_template: "{input_basename}_mask.nii"
-          description: "Binary mask used for wave extraction"
+          description: "Mask used for wave extraction (the approved brain mask)"
         - id: t2_stack
           filename_template: "{input_basename}_t2stack.nii"
           description: "T2-weighted magnitude stack (echo geometric mean)"
@@ -223,20 +241,6 @@ stages:
           filename_template: "{input_basename}_mre_sentinel.mat"
           description: "Sentinel-ready MRE displacement bundle (read_mre_uiuc layout)"
       overlay_on_reconstruction: true
-
-  # The approved (optionally edited) HD-BET mask is passed on to the inversion,
-  # which uses it in place of the magnitude-threshold mask in the .mat.
-  - name: Brain Masking
-    type: interactive
-    backend: python
-    module: hd-bet-masking
-    auto_method: hd-bet
-    allow_manual_edit: true
-    auto_approve: false
-    passthrough_inputs: true
-    output:
-      filename_template: "{input_basename}_brain_mask.nii"
-      keep_intermediate: true
 
   - name: MRE Inversion
     type: postprocessing
