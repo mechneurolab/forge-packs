@@ -244,6 +244,13 @@ function output_paths = extractWaves(config_path)
   Ymotion = wave_fields(:,:,:,2);
   Xmotion = wave_fields(:,:,:,3);
 
+  % Sentinel's read_mre_uiuc expects the axis signs of magneto's legacy
+  % proc_3d_empire, which flips the images along dims 1 and 3 before saving.
+  % Without those flips Y and Z motion point the wrong way relative to the
+  % grid and the inversion drifts upward, so negate them here.
+  Ymotion = -Ymotion;
+  Zmotion = -Zmotion;
+
   forge_log('info', 'extractWaves: wave field range — X:[%.3g, %.3g] Y:[%.3g, %.3g] Z:[%.3g, %.3g]', ...
     min(abs(Xmotion(:))), max(abs(Xmotion(:))), ...
     min(abs(Ymotion(:))), max(abs(Ymotion(:))), ...
