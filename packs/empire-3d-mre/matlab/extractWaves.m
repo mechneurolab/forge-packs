@@ -17,7 +17,9 @@ function output_paths = extractWaves(config_path)
 %    7. Write X/Y/Z wave displacement NIfTIs
 %
 %  Config fields (from _step_config_wave_extract.json):
-%    config.input_paths{1}                  - Path to recon output directory
+%    config.input_paths                     - Recon outputs (or their directory), plus
+%                                             the approved *_brain_mask*.nii from the
+%                                             Brain Masking stage when it runs first
 %    config.output_dir                      - Directory for output files
 %    config.params.frequency_hz             - Vibration frequency in Hz
 %    config.params.num_harmonics            - Number of harmonics to extract
@@ -32,7 +34,18 @@ function output_paths = extractWaves(config_path)
 
   config     = forge_read_config(config_path);
   output_dir = config.output_dir;
-  recon_path = config.input_paths{1};
+  input_paths = cellstr(config.input_paths);
+
+  % The Brain Masking stage runs before this one and passes its inputs
+  % through, so the inputs are [brain mask, recon outputs...]. Split them.
+  is_brain_mask = ~cellfun(@isempty, regexp(input_paths, '_brain_mask[^/\\]*\.nii(\.gz)?$', 'once'));
+  brain_mask_path = '';
+  if any(is_brain_mask)
+    brain_mask_path = input_paths{find(is_brain_mask, 1)};
+  end
+  recon_inputs = input_paths(~is_brain_mask);
+  assert(~isempty(recon_inputs), 'extractWaves:noRecon', 'No reconstruction inputs given');
+  recon_path = recon_inputs{1};
 
   % The pipeline chains individual file paths from the previous stage.
   % If recon_path points to a file rather than a directory, use its parent.
@@ -41,7 +54,7 @@ function output_paths = extractWaves(config_path)
   end
 
   % Parameters
-  freq_hz        = forge_param(config, 'frequency_hz', 60.0);
+  freq_hz        = forge_param(config, 'frequency_hz', 50.0);
   num_harmonics  = forge_param(config, 'num_harmonics', 1);
   disp_comp      = forge_param(config, 'displacement_component', 'all');
   n_echoes       = forge_param(config, 'n_echoes', 2);
@@ -167,10 +180,26 @@ function output_paths = extractWaves(config_path)
   forge_log('info', 'extractWaves: Laplacian phase unwrapping');
   forge_progress('waves', 4, 7, 'Wave Extraction', 'Phase unwrapping');
 
-  % Create brain mask from magnitude for masking
+  % Mask for unwrapping, extraction and the inversion: the approved brain
+  % mask (HD-BET, possibly edited at the gate) when the Brain Masking stage
+  % ran first, else a magnitude threshold.
   mag_avg = mean(abs(img), ndims(img)); % average magnitude across reps
   mask_thresh = multithresh(abs(mag_avg));
-  mask = abs(mag_avg) > mask_thresh;
+  thresh_mask = abs(mag_avg) > mask_thresh;
+  if ~isempty(brain_mask_path)
+    bm_nii = load_untouch_nii(brain_mask_path);
+    mask = squeeze(bm_nii.img) > 0;
+    assert(isequal(size(mask), [nx ny nz]), 'extractWaves:maskSize', ...
+      'Brain mask %s is %s but the reconstruction is %dx%dx%d', ...
+      brain_mask_path, mat2str(size(mask)), nx, ny, nz);
+    assert(any(mask(:)), 'extractWaves:emptyMask', 'Brain mask %s is empty', brain_mask_path);
+    check_mask_orientation(mask, thresh_mask, brain_mask_path);
+    forge_log('info', 'extractWaves: using brain mask %s (%d voxels; magnitude threshold would give %d)', ...
+      brain_mask_path, nnz(mask), nnz(thresh_mask));
+  else
+    mask = thresh_mask;
+    forge_log('info', 'extractWaves: no brain mask input; using magnitude threshold (%d voxels)', nnz(mask));
+  end
 
   phase_unwrapped = zeros(nx, ny, nz, 3, n_phase_offsets, 'single');
   total_unwraps = 3 * n_phase_offsets;
@@ -215,6 +244,13 @@ function output_paths = extractWaves(config_path)
   Ymotion = wave_fields(:,:,:,2);
   Xmotion = wave_fields(:,:,:,3);
 
+  % Sentinel's read_mre_uiuc expects the axis signs of magneto's legacy
+  % proc_3d_empire, which flips the images along dims 1 and 3 before saving.
+  % Without those flips Y and Z motion point the wrong way relative to the
+  % grid and the inversion drifts upward, so negate them here.
+  Ymotion = -Ymotion;
+  Zmotion = -Zmotion;
+
   forge_log('info', 'extractWaves: wave field range — X:[%.3g, %.3g] Y:[%.3g, %.3g] Z:[%.3g, %.3g]', ...
     min(abs(Xmotion(:))), max(abs(Xmotion(:))), ...
     min(abs(Ymotion(:))), max(abs(Ymotion(:))), ...
@@ -228,7 +264,9 @@ function output_paths = extractWaves(config_path)
   ref_nii = load_untouch_nii(first_mag);
 
   % Compute OSS-SNR from unwrapped phase images
-  OSS_SNR = oss_snr_filter(double(phase_unwrapped), [dx dy dz], freq_hz, double(mask));
+  % oss_snr_filter (magneto convdata) writes dcfiles/ into the current
+  % directory and prompts if it exists, so run it in a fresh temp directory.
+  OSS_SNR = oss_snr_in_tempdir(double(phase_unwrapped), [dx dy dz], freq_hz, double(mask));
 
   % Compute t2stack (mean magnitude across reps) for anatomical reference
   t2stack = mean(abs(squeeze(img)), ndims(squeeze(img)));
@@ -377,4 +415,49 @@ function write_scalar_nifti(filepath, data, ref_nii)
   out_nii.hdr.dime.bitpix = 32;
   out_nii.hdr.hist.descrip = 'MRE wave displacement';
   save_untouch_nii(out_nii, filepath);
+end
+
+
+function check_mask_orientation(mask, ref, mask_path)
+%CHECK_MASK_ORIENTATION  Error if the brain mask is flipped relative to the data.
+%  The magnitude-threshold mask covers the head on the recon grid. A brain
+%  mask in the same orientation overlaps it best as is; if flipping it along
+%  some axes overlaps clearly better (by 0.1), its voxel order doesn't match.
+  frac = @(m) nnz(m & ref) / nnz(m);
+  c = frac(mask);
+  best = c; best_dims = [];
+  combos = {1, 2, 3, [1 2], [1 3], [2 3], [1 2 3]};
+  for k = 1:numel(combos)
+    m = mask;
+    for d = combos{k}
+      m = flip(m, d);
+    end
+    fc = frac(m);
+    if fc > best
+      best = fc; best_dims = combos{k};
+    end
+  end
+  forge_log('info', 'extractWaves: %.1f%% of the brain mask is inside the magnitude threshold', 100 * c);
+  assert(best <= c + 0.1, 'extractWaves:maskFlipped', ...
+    ['Brain mask %s does not line up with the reconstruction: %.1f%% overlap as is, ' ...
+     '%.1f%% when flipped along dims %s'], mask_path, 100 * c, 100 * best, mat2str(best_dims));
+end
+
+
+function OSS_SNR = oss_snr_in_tempdir(phase, voxel_size, freq_hz, mask)
+%OSS_SNR_IN_TEMPDIR  Run oss_snr_filter inside a fresh temporary directory.
+%  magneto's convdata writes dcfiles/ into the current directory and prompts
+%  for confirmation if it already exists, which fails without a console.
+  tmp_dir = tempname;
+  mkdir(tmp_dir);
+  old_dir = cd(tmp_dir);
+  cleanup = onCleanup(@() restore_and_remove(old_dir, tmp_dir)); %#ok<NASGU>
+  OSS_SNR = oss_snr_filter(phase, voxel_size, freq_hz, mask);
+end
+
+function restore_and_remove(old_dir, tmp_dir)
+  cd(old_dir);
+  if exist(tmp_dir, 'dir')
+    rmdir(tmp_dir, 's');
+  end
 end

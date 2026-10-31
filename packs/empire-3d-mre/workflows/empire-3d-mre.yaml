@@ -8,7 +8,7 @@ description: >-
   ISMRMRD file. Reconstruction via forgeSense (single-shot SENSE).
   Postprocessing extracts harmonic wave displacements from the
   reconstructed MRE images.
-version: 1
+version: 3
 author: FORGE Team
 tags: [mre, elastography, 3d, empire, sense]
 python_requirements: requirements.txt
@@ -113,9 +113,27 @@ stages:
             max: 3
             group: Advanced
 
+  # HD-BET runs on the reconstructed magnitude (the prep overlay, same grid).
+  # The approved (optionally edited) mask goes to Wave Extraction, which
+  # unwraps and extracts over it; passthrough carries the recon outputs along.
+  - name: Brain Masking
+    type: interactive
+    backend: python
+    module: hd-bet-masking
+    auto_method: hd-bet
+    allow_manual_edit: true
+    auto_approve: false
+    passthrough_inputs: true
+    output:
+      filename_template: "{input_basename}_brain_mask.nii"
+      keep_intermediate: true
+
   - name: Wave Extraction
     type: postprocessing
     backend: matlab
+    # Pass the brain mask on so the inversion worker can check it against the
+    # .mat (its brain ∩ magnitude-mask safety net).
+    passthrough_inputs: true
     steps:
       - id: wave_extract
         name: Harmonic Wave Extraction
@@ -124,8 +142,11 @@ stages:
           frequency_hz:
             type: float
             label: Vibration frequency (Hz)
-            description: Mechanical excitation frequency used during the MRE acquisition
-            default: 60.0
+            description: >-
+              Mechanical excitation frequency used during the MRE acquisition.
+              The inversion reads it from the wave-extraction output, so set it
+              here only.
+            default: 50.0
             min: 10.0
             max: 500.0
             step: 5.0
@@ -212,7 +233,7 @@ stages:
           description: "MRE parameters (frequency, scale, SNR metrics)"
         - id: mre_mask
           filename_template: "{input_basename}_mask.nii"
-          description: "Binary mask used for wave extraction"
+          description: "Mask used for wave extraction (the approved brain mask)"
         - id: t2_stack
           filename_template: "{input_basename}_t2stack.nii"
           description: "T2-weighted magnitude stack (echo geometric mean)"
@@ -220,18 +241,6 @@ stages:
           filename_template: "{input_basename}_mre_sentinel.mat"
           description: "Sentinel-ready MRE displacement bundle (read_mre_uiuc layout)"
       overlay_on_reconstruction: true
-
-  - name: Brain Masking
-    type: interactive
-    backend: python
-    module: hd-bet-masking
-    auto_method: hd-bet
-    allow_manual_edit: true
-    auto_approve: false
-    passthrough_inputs: true
-    output:
-      filename_template: "{input_basename}_brain_mask.nii"
-      keep_intermediate: true
 
   - name: MRE Inversion
     type: postprocessing
@@ -243,6 +252,20 @@ stages:
         name: Sentinel Nonlinear Inversion
         module: sentinel-inversion
         params:
+          compute_backend:
+            type: enum
+            label: Compute backend
+            description: >-
+              GPU acceleration vs multicore CPU for the inversion's gradient
+              computation. 'gpu' uses the platform accelerator (Metal on macOS,
+              CUDA on Linux), falling back to CPU if unavailable. 'auto' defers
+              to the global Sentinel setting (Settings → Backends).
+            values: [auto, gpu, cpu]
+            labels:
+              auto: "Auto (Settings default)"
+              gpu: "GPU acceleration"
+              cpu: "Multicore CPU"
+            default: auto
           material_model:
             type: enum
             label: Material model
@@ -252,15 +275,22 @@ stages:
             type: enum
             label: Regularization
             values: [total_variation, tikhonov, soft_prior, spatial_filter, van_houten, marquardt, joachimowicz]
-            default: total_variation
+            # spatial_filter adds nothing to Sentinel's always-on set (spatial
+            # filter, CG residual scaling, Van Houten, McGarry bounds), which is
+            # NLI's standard EMPIRE regularization.
+            default: spatial_filter
           reg_weight:
             type: float
             label: Regularization weight
-            default: 0.001
+            description: >-
+              Weight of the selected TV / Tikhonov / Joachimowicz / soft-prior
+              term (ignored by spatial_filter). 5e-16 is Sentinel's calibrated
+              TV default.
+            default: 5.0e-16
             min: 0.0
             max: 1.0
             scale: log
-            precision: 4
+            precision: 16
           optimizer:
             type: enum
             label: Optimizer
@@ -272,13 +302,8 @@ stages:
             values: [krylov, mumps]
             default: krylov
             group: Advanced
-          frequency_hz:
-            type: float
-            label: Vibration frequency (Hz)
-            default: 60.0
-            min: 10.0
-            max: 500.0
-            unit: Hz
+          # No frequency_hz here: the worker takes mreParams.freq from the
+          # wave-extraction .mat, so the two stages cannot disagree.
           density_kg_m3:
             type: float
             label: Tissue density (kg/m^3)
@@ -297,7 +322,7 @@ stages:
           max_global_iters:
             type: int
             label: Max global iterations
-            default: 20
+            default: 100
             min: 1
             max: 200
             group: Advanced
