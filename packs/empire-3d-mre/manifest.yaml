@@ -1,12 +1,13 @@
 id: empire-3d-mre
 name: EMPIRE 3D MRE
-version: 1.3.0
+version: 1.4.0
 author: FORGE Team
 license: MIT
 description: >-
   3D Magnetic Resonance Elastography reconstruction pipeline for the
   EMPIRE pulse sequence. MATLAB preparation, FORGE SENSE reconstruction,
-  harmonic wave extraction, HD-BET brain masking, and MRE inversion.
+  Julia harmonic wave extraction, HD-BET brain masking, and Sentinel MRE
+  inversion.
 min_studio_version: "0.3.0"
 
 requires:

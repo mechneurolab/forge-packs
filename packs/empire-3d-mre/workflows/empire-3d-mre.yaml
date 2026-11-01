@@ -6,7 +6,7 @@ description: >-
   EMPIRE pulse sequence (udel_3d_empire). Uses MATLAB-based preparation
   to parse TWIX data, estimate coil sensitivities, and produce a prepared
   ISMRMRD file. Reconstruction via forgeSense (single-shot SENSE).
-  Postprocessing extracts harmonic wave displacements from the
+  Postprocessing (Julia) extracts harmonic wave displacements from the
   reconstructed MRE images.
 version: 3
 author: FORGE Team
@@ -128,16 +128,18 @@ stages:
       filename_template: "{input_basename}_brain_mask.nii"
       keep_intermediate: true
 
+  # Julia (julia/extract_waves.jl), so the stage runs without MATLAB, e.g. on
+  # Linux servers. It unwraps with ROMEO and extracts over the brain mask.
   - name: Wave Extraction
     type: postprocessing
-    backend: matlab
+    backend: julia
     # Pass the brain mask on so the inversion worker can check it against the
     # .mat (its brain ∩ magnitude-mask safety net).
     passthrough_inputs: true
     steps:
       - id: wave_extract
         name: Harmonic Wave Extraction
-        module: extractWaves
+        module: extract-waves
         params:
           frequency_hz:
             type: float
