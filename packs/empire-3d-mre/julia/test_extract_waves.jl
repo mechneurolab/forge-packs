@@ -42,6 +42,96 @@ end
     @test_throws ErrorException unwrap_phases(ratio, ones(Float32, n, n, n, 2, 1), mask)
 end
 
+# Cut cost of a 0/1 labelling (1 = sink side) under the original capacities.
+function cut_cost(nbr, cap, tr, sink)
+    c = 0
+    for i in eachindex(tr)
+        tr[i] > 0 && sink[i] && (c += tr[i])
+        tr[i] < 0 && !sink[i] && (c -= tr[i])
+        for d in 1:6
+            j = nbr[d, i]
+            j != 0 && !sink[i] && sink[j] && (c += cap[d, i])
+        end
+    end
+    return c
+end
+
+@testset "max-flow min cut matches brute force on small grids" begin
+    rng = MersenneTwister(5)
+    # Grids of at most 12 voxels, so every labelling can be enumerated.
+    shapes = ((2, 2, 3), (3, 2, 2), (2, 3, 2), (1, 3, 4), (4, 3, 1))
+    for trial in 1:200
+        mask = rand(rng, shapes[mod1(trial, length(shapes))]...) .< 0.8
+        mask[1] = true
+        _, nbr = _mask_graph(mask)
+        n = size(nbr, 2)
+        cap = Int64[nbr[d, i] == 0 ? 0 : rand(rng, 0:9) for d in 1:6, i in 1:n]
+        tr = Int64[rand(rng, -12:12) for _ in 1:n]
+        side = _bk_mincut!(nbr, copy(cap), copy(tr))
+        got = cut_cost(nbr, cap, tr, side .== 2)
+        best = minimum(cut_cost(nbr, cap, tr, [((b >> (i - 1)) & 1) == 1 for i in 1:n])
+                       for b in 0:(2^n - 1))
+        @test got == best
+    end
+end
+
+@testset "refine_wraps! finds the global minimum and fixes 2π patches" begin
+    n = 18
+    c = (n - 1) / 2
+    grid = [(i, j, k) for i in 0:n-1, j in 0:n-1, k in 0:n-1]
+    mask = BitArray([(i - c)^2 + (j - c)^2 + (k - c)^2 < (n / 2 - 1)^2 for (i, j, k) in grid])
+    # Smooth phase with every neighbour step below π, so the true unwrap is the
+    # unique minimum of the squared neighbour differences.
+    truth = [12 * exp(-((i - c)^2 + (j - c + 2)^2 + (k - c)^2) / (2 * 4.5^2)) + 0.3i
+             for (i, j, k) in grid] .* mask
+    energy(φ) = sum(sum(abs2, diff(φ; dims = a)[mask[ntuple(b -> b == a ? (1:n-1) : (1:n), 3)...] .&
+                                                mask[ntuple(b -> b == a ? (2:n) : (1:n), 3)...]])
+                    for a in 1:3)
+    patch1 = BitArray([(i - 6)^2 + (j - 7)^2 + (k - 8)^2 < 9 for (i, j, k) in grid]) .& mask
+    patch2 = BitArray([(i - 11)^2 + (j - 11)^2 + (k - 9)^2 < 6 for (i, j, k) in grid]) .& mask
+    patch3 = BitArray([(i - 9)^2 + (j - 12)^2 + (k - 12)^2 < 4 for (i, j, k) in grid]) .& mask
+    start = copy(truth)
+    start[patch1] .+= 2π
+    start[patch2] .-= 2π
+    start[patch3] .+= 4π
+    @test energy(start) > energy(truth)
+    φ = copy(start)
+    moved = refine_wraps!(φ, mask)
+    @test maximum(abs, φ[mask] .- truth[mask]) < 1e-9
+    @test moved == count(patch1 .| patch2 .| patch3)
+    @test all(iszero, φ[.!mask])
+    @test refine_wraps!(φ, mask) == 0                      # already at the minimum
+    @test_throws ErrorException refine_wraps!(φ, trues(4, 4, 4))
+    # Float32 volumes, as unwrap_phases passes them, are moved in place too.
+    φ32 = Float32.(start)
+    refine_wraps!(φ32, mask)
+    @test maximum(abs, φ32[mask] .- Float32.(truth[mask])) < 1e-4
+end
+
+@testset "unwrap_phases refinement removes a 2π patch in one offset" begin
+    n = 24
+    c = (n - 1) / 2
+    grid = [(i, j, k) for i in 0:n-1, j in 0:n-1, k in 0:n-1]
+    mask = BitArray([(i - c)^2 + (j - c)^2 + (k - c)^2 < (n / 2 - 2)^2 for (i, j, k) in grid])
+    truth = [4 * cos(2π * (i / 14 + j / 19) - 0.5) + 0.2k for (i, j, k) in grid]
+    ratio = reshape(ComplexF32.(cis.(truth)), n, n, n, 1, 1)
+    mag = ones(Float32, n, n, n, 1, 1)
+    moved = Int[]
+    un = unwrap_phases(ratio, mag, mask; on_refine = m -> push!(moved, m))
+    off = Float64.(un[:, :, :, 1, 1])[mask] .- truth[mask]
+    @test maximum(abs, off .- off[1]) < 1e-3
+    @test moved == [0]                                     # ROMEO was already right
+    # A patch shifted by 2π (as ROMEO can leave in a low-signal region) is moved back.
+    patch = BitArray([(i - 8)^2 + (j - 14)^2 + (k - 12)^2 < 10 for (i, j, k) in grid]) .& mask
+    φ = Float32.(un[:, :, :, 1, 1])
+    φ[patch] .+= Float32(2π)
+    @test refine_wraps!(φ, mask) == count(patch)
+    @test maximum(abs, φ .- un[:, :, :, 1, 1]) < 1e-4
+    raw = Float64.(unwrap_phases(ratio, mag, mask; refine = false))[:, :, :, 1, 1][mask]
+    d = raw .- Float64.(un[:, :, :, 1, 1])[mask]
+    @test maximum(abs, d .- d[1]) < 1e-4                  # same up to the global 2π choice
+end
+
 @testset "echo1_magnitudes follows meg_order" begin
     nx, ny, nz, ne, nm, nph = 2, 2, 2, 2, 3, 2
     img = ones(ComplexF32, nx, ny, nz, ne * nm * nph)
@@ -172,6 +262,7 @@ end
     @test size(res.Xmotion) == (n, n, n)
     @test eltype(res.Xmotion) == ComplexF32
     @test res.n_phase_offsets == 4
+    @test res.n_wraps_refined == 0                         # nothing wraps in this phantom
     c = n ÷ 2 + 1
     @test res.mask[c, c, c] && !res.mask[1, 1, 1]
     # Centre amplitude ≈ A_d * scale (g ≈ 1 there).

@@ -214,6 +214,7 @@ function _run(rdir, brain_mask_path, output_dir, freq_hz, disp_comp, n_echoes, n
     rng(a) = "[$(minimum(abs, a)), $(maximum(abs, a))]"
     say("wave field range — X:$(rng(X)) Y:$(rng(Y)) Z:$(rng(Z))")
     say("OSS-SNR = $(res.oss_snr)")
+    say("2π refinement moved $(res.n_wraps_refined) voxels across all volumes")
 
     # ── Outputs ─────────────────────────────────────────────────────────────
     base = subject_name(rdir)

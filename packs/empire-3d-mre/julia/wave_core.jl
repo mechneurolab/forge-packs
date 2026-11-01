@@ -5,9 +5,9 @@
 # Strain_SNR.m, OSS_noise.m, smooth3dimage.m). The port follows the MATLAB
 # arithmetic step by step, including its quirks, so the outputs match the MATLAB
 # pipeline to floating-point tolerance. Quirks kept on purpose are marked
-# "MATLAB parity". Two deliberate departures: phase unwrapping uses ROMEO
-# instead of extractWaves' Laplacian method, and Y and Z motion are negated
-# for Sentinel's UIUC reader.
+# "MATLAB parity". Two deliberate departures: phase unwrapping uses ROMEO plus
+# a global 2π refinement (PUMA, solved by max-flow) instead of extractWaves'
+# Laplacian method, and Y and Z motion are negated for Sentinel's UIUC reader.
 #
 # Pure functions only: no file I/O, no logging. The worker
 # (extract_waves_worker.jl) does the NIfTI/.mat I/O around `extract_waves`.
@@ -108,30 +108,375 @@ function echo1_magnitudes(img::AbstractArray{ComplexF32,4}, n_echoes::Int, n_meg
     return mag
 end
 
+# ─── Global 2π refinement: PUMA with a quadratic potential ────────────────────
+
+const _NBR6 = (CartesianIndex(1, 0, 0), CartesianIndex(-1, 0, 0), CartesianIndex(0, 1, 0),
+               CartesianIndex(0, -1, 0), CartesianIndex(0, 0, 1), CartesianIndex(0, 0, -1))
+_opp(d::Integer) = isodd(d) ? d + 1 : d - 1     # the reverse of direction d in _NBR6
+
+# Parent codes in the max-flow search trees; 1–6 is the direction of the parent.
+const _BK_NONE = Int8(0)
+const _BK_TERM = Int8(7)
+const _BK_ORPHAN = Int8(8)
+
 """
-    unwrap_phases(ratio, mag, mask) -> Array{Float32,5}
+    _bk_mincut!(nbr, rcap, tr) -> Vector{Int8}
+
+Minimum s–t cut of a graph whose nodes have up to six neighbours, by the
+Boykov–Kolmogorov max-flow algorithm (IEEE TPAMI 2004). `nbr[d, i]` is node
+i's neighbour in direction d of `_NBR6` (0 for none), `rcap[d, i]` the
+capacity of the arc i → nbr[d, i], and `tr[i]` the terminal capacity: > 0
+from the source, < 0 to the sink. `rcap` and `tr` are overwritten with the
+residuals. Returns each node's side of the cut: 2 for the sink side, 1 or 0
+(reached from the source, or from neither) for the source side.
+"""
+function _bk_mincut!(nbr::AbstractMatrix{Int32}, rcap::AbstractMatrix{Int64},
+                     tr::AbstractVector{Int64})
+    n = length(tr)
+    tree = zeros(Int8, n)          # 0 free, 1 source tree, 2 sink tree
+    parent = zeros(Int8, n)
+    ts = zeros(Int, n)             # timestamp and distance-to-terminal heuristics
+    dist = zeros(Int, n)
+    queue = Int32[]                # FIFO of active nodes
+    qhead = 1
+    inq = falses(n)
+    orphans = Int32[]              # FIFO of orphans
+    activate(i) = (inq[i] || (inq[i] = true; push!(queue, i)); nothing)
+    for i in 1:n
+        if tr[i] != 0
+            tree[i] = tr[i] > 0 ? Int8(1) : Int8(2)
+            parent[i] = _BK_TERM
+            dist[i] = 1
+            activate(i)
+        end
+    end
+    stamp = 0
+    current = 0
+    while true
+        # Next active node: keep growing from the last one while it is in a tree.
+        i = 0
+        if current != 0 && parent[current] != _BK_NONE
+            i = current
+        else
+            current = 0
+            while qhead <= length(queue)
+                c = Int(queue[qhead])
+                qhead += 1
+                inq[c] = false
+                if parent[c] != _BK_NONE
+                    i = c
+                    break
+                end
+            end
+            if qhead > 4096 && 2qhead > length(queue)
+                deleteat!(queue, 1:qhead-1)
+                qhead = 1
+            end
+            i == 0 && break
+        end
+
+        # Growth: extend i's tree until it touches the other tree at arc u → v.
+        u = v = dmid = 0
+        if tree[i] == 1
+            for d in 1:6
+                j = Int(nbr[d, i])
+                (j == 0 || rcap[d, i] <= 0) && continue
+                if parent[j] == _BK_NONE
+                    tree[j] = 1; parent[j] = Int8(_opp(d)); ts[j] = ts[i]; dist[j] = dist[i] + 1
+                    activate(j)
+                elseif tree[j] == 2
+                    u, v, dmid = i, j, d
+                    break
+                elseif ts[j] <= ts[i] && dist[j] > dist[i]
+                    parent[j] = Int8(_opp(d)); ts[j] = ts[i]; dist[j] = dist[i] + 1
+                end
+            end
+        else
+            for d in 1:6
+                j = Int(nbr[d, i])
+                (j == 0 || rcap[_opp(d), j] <= 0) && continue
+                if parent[j] == _BK_NONE
+                    tree[j] = 2; parent[j] = Int8(_opp(d)); ts[j] = ts[i]; dist[j] = dist[i] + 1
+                    activate(j)
+                elseif tree[j] == 1
+                    u, v, dmid = j, i, _opp(d)
+                    break
+                elseif ts[j] <= ts[i] && dist[j] > dist[i]
+                    parent[j] = Int8(_opp(d)); ts[j] = ts[i]; dist[j] = dist[i] + 1
+                end
+            end
+        end
+        if u == 0
+            current = 0
+            continue
+        end
+        current = i
+        stamp += 1
+
+        # Augmentation along source → … → u → v → … → sink.
+        f = rcap[dmid, u]
+        x = u
+        while parent[x] != _BK_TERM
+            dp = Int(parent[x]); p = Int(nbr[dp, x])
+            f = min(f, rcap[_opp(dp), p])
+            x = p
+        end
+        f = min(f, tr[x])
+        x = v
+        while parent[x] != _BK_TERM
+            dp = Int(parent[x])
+            f = min(f, rcap[dp, x])
+            x = Int(nbr[dp, x])
+        end
+        f = min(f, -tr[x])
+        rcap[dmid, u] -= f
+        rcap[_opp(dmid), v] += f
+        x = u
+        while parent[x] != _BK_TERM
+            dp = Int(parent[x]); p = Int(nbr[dp, x])
+            rcap[_opp(dp), p] -= f
+            rcap[dp, x] += f
+            if rcap[_opp(dp), p] == 0
+                parent[x] = _BK_ORPHAN
+                push!(orphans, x)
+            end
+            x = p
+        end
+        tr[x] -= f
+        if tr[x] == 0
+            parent[x] = _BK_ORPHAN
+            push!(orphans, x)
+        end
+        x = v
+        while parent[x] != _BK_TERM
+            dp = Int(parent[x]); p = Int(nbr[dp, x])
+            rcap[dp, x] -= f
+            rcap[_opp(dp), p] += f
+            if rcap[dp, x] == 0
+                parent[x] = _BK_ORPHAN
+                push!(orphans, x)
+            end
+            x = p
+        end
+        tr[x] += f
+        if tr[x] == 0
+            parent[x] = _BK_ORPHAN
+            push!(orphans, x)
+        end
+
+        # Adoption: reattach each orphan to its tree or free it.
+        ohead = 1
+        while ohead <= length(orphans)
+            o = Int(orphans[ohead])
+            ohead += 1
+            to = tree[o]
+            best_d = 0
+            best = typemax(Int)
+            for d in 1:6
+                j = Int(nbr[d, o])
+                (j == 0 || tree[j] != to || parent[j] == _BK_NONE) && continue
+                (to == 1 ? rcap[_opp(d), j] : rcap[d, o]) > 0 || continue
+                # Does j still lead to a terminal? Walk up, using timestamps.
+                k = j
+                dd = 0
+                ok = false
+                while true
+                    if ts[k] == stamp
+                        dd += dist[k]
+                        ok = true
+                        break
+                    end
+                    pk = parent[k]
+                    dd += 1
+                    if pk == _BK_TERM
+                        ts[k] = stamp
+                        dist[k] = 1
+                        ok = true
+                        break
+                    end
+                    (pk == _BK_ORPHAN || pk == _BK_NONE) && break
+                    k = Int(nbr[pk, k])
+                end
+                ok || continue
+                if dd < best
+                    best = dd
+                    best_d = d
+                end
+                k = j
+                while ts[k] != stamp
+                    ts[k] = stamp
+                    dist[k] = dd
+                    dd -= 1
+                    k = Int(nbr[parent[k], k])
+                end
+            end
+            if best_d != 0
+                parent[o] = Int8(best_d)
+                ts[o] = stamp
+                dist[o] = best + 1
+            else
+                parent[o] = _BK_NONE
+                tree[o] = 0
+                for d in 1:6
+                    j = Int(nbr[d, o])
+                    (j == 0 || tree[j] != to || parent[j] == _BK_NONE) && continue
+                    (to == 1 ? rcap[_opp(d), j] : rcap[d, o]) > 0 && activate(j)
+                    pj = parent[j]
+                    if pj != _BK_TERM && pj != _BK_ORPHAN && nbr[pj, j] == o
+                        parent[j] = _BK_ORPHAN
+                        push!(orphans, j)
+                    end
+                end
+            end
+        end
+        empty!(orphans)
+    end
+    return tree
+end
+
+# In-mask voxels and their 6-connected in-mask neighbours, as node indices.
+function _mask_graph(mask::AbstractArray{Bool,3})
+    idx = findall(mask)
+    id = zeros(Int32, size(mask))
+    for (t, I) in enumerate(idx)
+        id[I] = t
+    end
+    nbr = zeros(Int32, 6, length(idx))
+    for (t, I) in enumerate(idx), d in 1:6
+        J = I + _NBR6[d]
+        checkbounds(Bool, mask, J) && mask[J] && (nbr[d, t] = id[J])
+    end
+    return idx, nbr
+end
+
+# Energies are rounded to integers at this resolution for the max-flow; the
+# accept/stop decision uses the exact energy change.
+const _PUMA_SCALE = 1.0e4
+
+"""
+    refine_wraps!(phase, mask; max_iter = 100) -> Int
+
+Move voxels of one unwrapped volume `phase` by whole multiples of 2π, inside
+`mask`, to minimise Σ (φ_i − φ_j)² over 6-connected in-mask neighbours. This is
+PUMA (Bioucas-Dias & Valadão, IEEE TIP 2007) with a quadratic potential:
+repeated binary moves k → k + δ, each solved exactly as a minimum cut. The
+potential is convex, so the result is the global minimum whatever the
+starting unwrap. The result stays congruent with the wrapped phase, and a
+uniform shift of the whole volume is neither applied nor counted. Returns the
+number of voxels moved.
+"""
+function refine_wraps!(phase::AbstractArray{<:Real,3}, mask::AbstractArray{Bool,3};
+                       max_iter::Int = 100)
+    size(phase) == size(mask) || error("phase is $(size(phase)) but the mask is $(size(mask))")
+    idx, nbr = _mask_graph(mask)
+    return _refine_wraps!(phase, idx, nbr; max_iter = max_iter)
+end
+
+function _refine_wraps!(phase::AbstractArray{<:Real,3}, idx::AbstractVector{<:CartesianIndex},
+                        nbr::AbstractMatrix{Int32}; max_iter::Int = 100)
+    n = length(idx)
+    n < 2 && return 0
+    x = Float64[phase[I] for I in idx]
+    k = zeros(Int, n)
+    U = zeros(Float64, n)
+    rcap = zeros(Int64, 6, n)
+    tr = zeros(Int64, n)
+    cpair = round(Int64, _PUMA_SCALE * 8π^2)
+    for _ in 1:max_iter
+        # Binary move δ: an edge i → j (j the +x/+y/+z neighbour) with
+        # a = φ_j − φ_i costs a² if δ_i = δ_j, (a + 2π)² for (0, 1) and
+        # (a − 2π)² for (1, 0). That is unary terms on i and j plus a
+        # constant 8π² arc i → j, cut when δ_i = 0 and δ_j = 1.
+        fill!(U, 0.0)
+        fill!(rcap, 0)
+        for t in 1:n, d in (1, 3, 5)
+            j = nbr[d, t]
+            j == 0 && continue
+            a = x[j] - x[t]
+            U[t] += 4π^2 - 4π * a
+            U[j] += 4π * a - 4π^2
+            rcap[d, t] = cpair
+        end
+        for t in 1:n
+            tr[t] = round(Int64, _PUMA_SCALE * U[t])
+        end
+        side = _bk_mincut!(nbr, rcap, tr)
+        ΔE = 0.0
+        for t in 1:n, d in (1, 3, 5)
+            j = nbr[d, t]
+            (j == 0 || (side[t] == 2) == (side[j] == 2)) && continue
+            a = x[j] - x[t]
+            b = a + 2π * ((side[j] == 2) - (side[t] == 2))
+            ΔE += b^2 - a^2
+        end
+        ΔE < -1e-6 || break
+        for t in 1:n
+            if side[t] == 2
+                x[t] += 2π
+                k[t] += 1
+            end
+        end
+    end
+    k0 = round(Int, median(k))
+    moved = 0
+    for (t, I) in enumerate(idx)
+        s = k[t] - k0
+        s == 0 && continue
+        phase[I] += 2π * s
+        moved += 1
+    end
+    return moved
+end
+
+# The global 2π multiple that puts the volume's median in [-π, π].
+function _correct_global!(phase::AbstractArray{Float32,3}, idx::AbstractVector{<:CartesianIndex})
+    isempty(idx) && return phase
+    phase .-= Float32(2π) * round(median(round.(Float64[phase[I] for I in idx] ./ 2π)))
+    return phase
+end
+
+"""
+    unwrap_phases(ratio, mag, mask; refine = true, on_volume, on_refine) -> Array{Float32,5}
 
 Wrapped phase of each echo ratio, masked, unwrapped with ROMEO (Dymerska et
 al., MRM 2021; quality-guided region growing weighted by the echo-1 magnitude
 `mag`) inside `mask`, masked again. ROMEO's result is congruent with the
 wrapped phase, unlike the Laplacian unwrap it replaces, whose error on the
-261005 EMPIRE scan was larger than the wave signal; its waves match FSL
-prelude's (r >= 0.998 per direction on that scan). `correctglobal` removes the
-2π multiple from each volume's mean so offsets don't leak into the harmonic.
+261005 EMPIRE scan was larger than the wave signal.
+
+ROMEO grows each volume along a single path, so in low-signal, high-motion
+regions one bad step can leave a patch a whole cycle off in one phase offset.
+With `refine`, `refine_wraps!` then moves voxels by 2π multiples to the global
+minimum of the squared neighbour differences. On the 261005 scan that cut the
+voxels whose waves differ from FSL prelude's from 92/247/578 (X/Y/Z) to
+9/55/386, with fewer phase jumps between neighbours and fewer inconsistent
+time courses than prelude. Most of the rest is one patch where prelude itself
+is inconsistent across offsets. `on_refine(n)` gets the number of voxels moved
+in each volume.
+
+Each volume then gets its global 2π multiple removed (median within ±π, as
+ROMEO's `correctglobal` does) so offsets don't leak into the harmonic.
 """
 function unwrap_phases(ratio::AbstractArray{ComplexF32,5}, mag::AbstractArray{Float32,5},
-                       mask::AbstractArray{Bool,3}; on_volume = (i, n) -> nothing)
+                       mask::AbstractArray{Bool,3}; refine::Bool = true,
+                       on_volume = (i, n) -> nothing, on_refine = n -> nothing)
     nx, ny, nz, nd, nph = size(ratio)
     size(mag) == size(ratio) || error("magnitude is $(size(mag)) but the echo ratios are $(size(ratio))")
+    size(mask) == (nx, ny, nz) || error("mask is $(size(mask)) but the echo ratios are $((nx, ny, nz))")
     bmask = BitArray(mask)
     fmask = Float32.(mask)
+    idx, nbr = refine ? _mask_graph(mask) : (findall(mask), zeros(Int32, 6, 0))
     out = Array{Float32,5}(undef, nx, ny, nz, nd, nph)
     n = nd * nph
     count = 0
     for di in 1:nd, p in 1:nph
         phi = angle.(@view ratio[:, :, :, di, p]) .* fmask
-        out[:, :, :, di, p] .= ROMEO.unwrap(phi; mag = mag[:, :, :, di, p], mask = bmask,
-                                            correctglobal = true)
+        u = ROMEO.unwrap(phi; mag = mag[:, :, :, di, p], mask = bmask, correctglobal = true)
+        if refine
+            on_refine(_refine_wraps!(u, idx, nbr))
+            _correct_global!(u, idx)
+        end
+        out[:, :, :, di, p] .= u
         count += 1
         on_volume(count, n)
     end
@@ -527,7 +872,8 @@ end
 
 Run the wave-extraction pipeline on `img` (`ComplexF32`, `[nx, ny, nz, n_reps]`).
 `brain_mask` (`[nx, ny, nz]` Bool) replaces the magnitude-threshold mask.
-Returns `(; Xmotion, Ymotion, Zmotion, mask, t2stack, oss_snr, n_phase_offsets)`.
+Returns `(; Xmotion, Ymotion, Zmotion, mask, t2stack, oss_snr, n_phase_offsets,
+n_wraps_refined)`, the last being the voxels `refine_wraps!` moved, summed over volumes.
 `on_step(step, label)` reports progress on the 7-step scale extractWaves used.
 """
 function extract_waves(img::AbstractArray{ComplexF32,4}, voxel_mm::NTuple{3,Float64};
@@ -542,7 +888,9 @@ function extract_waves(img::AbstractArray{ComplexF32,4}, voxel_mm::NTuple{3,Floa
     # Average magnitude across reps; also the anatomical t2stack.
     mag_avg = dropdims(mean(abs.(img); dims = 4); dims = 4)
     mask = resolve_mask(brain_mask, abs.(mag_avg) .> otsu_threshold(abs.(mag_avg)))
-    phase_unwrapped = unwrap_phases(ratio, echo1_magnitudes(img, n_echoes, n_meg, meg_order), mask)
+    moved = Ref(0)
+    phase_unwrapped = unwrap_phases(ratio, echo1_magnitudes(img, n_echoes, n_meg, meg_order), mask;
+                                    on_refine = m -> (moved[] += m))
 
     on_step(5, "Harmonic extraction")
     waves = harmonic_waves(phase_unwrapped, disp_scale)
@@ -568,5 +916,6 @@ function extract_waves(img::AbstractArray{ComplexF32,4}, voxel_mm::NTuple{3,Floa
         t2stack = mag_avg,
         oss_snr = snr,
         n_phase_offsets = size(phase_unwrapped, 5),
+        n_wraps_refined = moved[],
     )
 end
